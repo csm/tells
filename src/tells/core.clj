@@ -55,14 +55,16 @@
   [size input output]
   (s/consume-async
     (fn [^ByteBuf message]
+      (tap> [:trace {:task ::pipe!
+                     :phase :begin
+                     :message message}])
       (let [content-type (.getByte message 0)
             version (.getUnsignedShort message 1)
             length (.getUnsignedShort message 3)]
-        (tap> [:trace {:task ::pipe! :phase :reading-content
+        (tap> [:debug {:task ::pipe! :phase :reading-content
                        :content-type content-type
                        :version version
-                       :length length
-                       :message message}])
+                       :length length}])
         (if (and (= 22 content-type) (> length size))
           (let [split-message (.buffer +pool+)
                 offsets (offsets size length)]
@@ -85,7 +87,7 @@
 (defn server
   [{:keys [connect size]}]
   (fn [in-conn conn-info]
-    (tap> [:debug {:task ::server :phase :connected :connection conn-info}])
+    (tap> [:info {:task ::server :phase :connected :connection conn-info}])
     (let [out-conn-ref (atom nil)]
       (s/on-closed in-conn
                    (fn []
