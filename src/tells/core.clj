@@ -66,19 +66,27 @@
                        :version version
                        :length length}])
         (if (and (= 22 content-type) (> length size))
-          (let [split-message (.buffer +pool+)
-                offsets (offsets size length)]
+          (let [offsets (offsets size length)]
             (tap> [:debug {:task ::pipe! :phase :made-offsets :offsets offsets}])
-            (loop [offsets offsets]
-              (when-let [offset (first offsets)]
-                (let [chunk (min size (- length offset))]
-                  (.writeByte split-message content-type)
-                  (.writeShort split-message version)
-                  (.writeShort split-message chunk)
-                  (.writeBytes split-message message (+ offset 5) chunk)
-                  (recur (rest offsets)))))
-            (tap> [:trace {:task ::pipe! :phase :end :output split-message}])
-            (s/put! output split-message))
+            (let [buffers (doall (map (fn [offset]
+                                        (let [chunk (min size (- length offset))
+                                              buffer (.buffer +pool+ (+ chunk 5))]
+                                          (.writeByte buffer content-type)
+                                          (.writeShort buffer version)
+                                          (.writeShort buffer chunk)
+                                          (.writeBytes buffer message (+ offset 5) chunk)
+                                          buffer))
+                                      offsets))]
+              (tap> [:trace {:task ::pipe! :phase :made-buffers :output buffers}])
+              (d/loop [buffers buffers]
+                (if-let [buffer (first buffers)]
+                  (d/chain
+                    (s/put! output buffer)
+                    (fn [sent?]
+                      (when sent?
+                        (d/recur (rest buffers)))))
+                  (do
+                    (tap> [:trace {:task ::pipe! :phase :end}]))))))
           (do
             (tap> [:trace {:task ::pipe! :phase :end :output message}])
             (s/put! output message)))))
