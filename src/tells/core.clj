@@ -86,6 +86,7 @@
                       (when sent?
                         (d/recur (rest buffers)))))
                   (do
+                    (.release message)
                     (tap> [:trace {:task ::pipe! :phase :end}]))))))
           (do
             (tap> [:trace {:task ::pipe! :phase :end :output message}])
