@@ -51,6 +51,22 @@
     (.write writer "\""))
   (.write writer "}"))
 
+(defn get-uint24
+  [buffer offset]
+  (bit-or (bit-shift-left (.getUnsignedByte buffer offset) 16)
+          (bit-shift-left (.getUnsignedByte buffer (inc offset)) 8)
+          (.getUnsignedByte buffer (+ offset 2))))
+
+(defn split-handshakes
+  [^ByteBuf buffer]
+  (loop [handshakes []
+         buffer buffer]
+    (if (>= (.readableBytes buffer) 4)
+      (let [hs-len (get-uint24 buffer 1)]
+        (recur (conj handshakes (.slice buffer 0 (+ hs-len 4)))
+               (.slice buffer (+ hs-len 4) (- (.readableBytes buffer) hs-len 4))))
+      (concat handshakes (when (pos? (.readableBytes buffer)) buffer)))))
+
 (defn pipe!
   [size input output]
   (s/consume-async
@@ -66,17 +82,20 @@
                        :version version
                        :length length}])
         (if (and (= 22 content-type) (> length size))
-          (let [offsets (offsets size length)]
-            (tap> [:debug {:task ::pipe! :phase :made-offsets :offsets offsets}])
-            (let [buffers (doall (map (fn [offset]
-                                        (let [chunk (min size (- length offset))
-                                              buffer (.buffer +pool+ (+ chunk 5))]
-                                          (.writeByte buffer content-type)
-                                          (.writeShort buffer version)
-                                          (.writeShort buffer chunk)
-                                          (.writeBytes buffer message (+ offset 5) chunk)
-                                          buffer))
-                                      offsets))]
+          (let [buffer (.slice message 5 length)
+                handshakes (split-handshakes buffer)
+                buffers (doall (mapcat (fn [handshake]
+                                         (let [offsets (offsets size (.readableBytes handshake))]
+                                           (doall (map (fn [offset]
+                                                         (let [chunk (min size (- (.readableBytes handshake) offset))
+                                                               buffer (.buffer +pool+ chunk)]
+                                                           (.writeByte buffer content-type)
+                                                           (.writeShort buffer version)
+                                                           (.writeShort buffer chunk)
+                                                           (.writeBytes buffer handshake offset chunk)
+                                                           buffer))
+                                                       offsets))))
+                                       handshakes))]
               (tap> [:trace {:task ::pipe! :phase :made-buffers :output buffers}])
               (d/loop [buffers buffers]
                 (if-let [buffer (first buffers)]
@@ -87,7 +106,7 @@
                         (d/recur (rest buffers)))))
                   (do
                     (.release message)
-                    (tap> [:trace {:task ::pipe! :phase :end}]))))))
+                    (tap> [:trace {:task ::pipe! :phase :end}])))))
           (do
             (tap> [:trace {:task ::pipe! :phase :end :output message}])
             (s/put! output message)))))
