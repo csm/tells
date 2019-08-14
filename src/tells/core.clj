@@ -7,7 +7,9 @@
   (:import [java.net InetSocketAddress]
            [io.netty.channel ChannelPipeline]
            [io.netty.handler.codec LengthFieldBasedFrameDecoder]
-           [io.netty.buffer ByteBuf ByteBufAllocator ByteBufUtil]))
+           [io.netty.buffer ByteBuf ByteBufAllocator ByteBufUtil]
+           [io.netty.handler.timeout ReadTimeoutHandler]
+           [java.util.concurrent TimeUnit]))
 
 (def optspec [["-c" "--connect SPEC" "Proxy connections to SPEC (addr:port)."
                :parse-fn #(let [parts (.split % ":" 2)]
@@ -21,6 +23,10 @@
                               2 (InetSocketAddress. ^String (first parts) (Integer/parseInt (second parts)))))]
               ["-s" "--size N" "Set maximum record size."
                :default 2048
+               :parse-fn #(Integer/parseInt %)
+               :validate-fn [pos-int?]]
+              ["-t" "--timeout N" "Set read timeout in milliseconds."
+               :default 60000
                :parse-fn #(Integer/parseInt %)
                :validate-fn [pos-int?]]
               ["-h" "--help" "Show this help and exit."]
@@ -113,7 +119,7 @@
     input))
 
 (defn server
-  [{:keys [connect size]}]
+  [{:keys [connect size timeout]}]
   (fn [in-conn conn-info]
     (tap> [:info {:task ::server :phase :connected :connection conn-info}])
     (let [out-conn-ref (atom nil)]
@@ -124,9 +130,11 @@
                        (s/close! c))))
       (d/chain
         (d/catch
-          (tcp/client {:remote-address connect
-                       :raw-stream? true
-                       :pipeline-transform add-record-length-decoder})
+          (tcp/client {:remote-address     connect
+                       :raw-stream?        true
+                       :pipeline-transform (fn [^ChannelPipeline pipeline]
+                                             (.addBefore pipeline "handler" "read-timeout" (ReadTimeoutHandler. timeout TimeUnit/MILLISECONDS))
+                                             (add-record-length-decoder pipeline))})
           (fn [error]
             (tap> [:info {:task ::server :phase :error-connecting :error error}])
             (s/close! in-conn)))
@@ -164,6 +172,8 @@
     (tap> [:info {:task ::main :phase :starting-up :options (:options options)}])
     (let [server (tcp/start-server (server (:options options))
                                    {:socket-address     (-> options :options :listen)
-                                    :pipeline-transform add-record-length-decoder
+                                    :pipeline-transform (fn [^ChannelPipeline pipeline]
+                                                          (.addBefore pipeline "handler" "read-timeout" (ReadTimeoutHandler. (-> options :options :timeout) TimeUnit/MILLISECONDS))
+                                                          (add-record-length-decoder pipeline))
                                     :raw-stream?        true})]
       (tap> [:info {:task ::main :phase :server-started :port (aleph.netty/port server)}]))))
