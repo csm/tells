@@ -9,7 +9,13 @@
            [io.netty.handler.codec LengthFieldBasedFrameDecoder]
            [io.netty.buffer ByteBuf ByteBufAllocator ByteBufUtil]
            [io.netty.handler.timeout ReadTimeoutHandler]
-           [java.util.concurrent TimeUnit]))
+           [java.util.concurrent TimeUnit]
+           [java.util.concurrent.atomic AtomicLong]))
+
+(def bytes-read (AtomicLong. 0))
+(def bytes-written (AtomicLong. 0))
+(def total-connections (AtomicLong. 0))
+(def connections (AtomicLong. 0))
 
 (def optspec [["-c" "--connect SPEC" "Proxy connections to SPEC (addr:port)."
                :parse-fn #(let [parts (.split % ":" 2)]
@@ -103,28 +109,41 @@
                                                        offsets))))
                                        handshakes))]
               (tap> [:trace {:task ::pipe! :phase :made-buffers :output buffers}])
+              (.addAndGet bytes-read (+ length 5))
               (d/loop [buffers buffers]
-                (if-let [buffer (first buffers)]
-                  (d/chain
-                    (s/put! output buffer)
-                    (fn [sent?]
-                      (when sent?
-                        (d/recur (rest buffers)))))
+                (if-let [buffer (first buffers) sent? true]
+                  (let [buflen (.readableBytes buffer)]
+                    (d/chain
+                      (s/put! output buffer)
+                      (fn [sent?]
+                        (when sent?
+                          (.addAndGet bytes-written buflen)
+                          (d/recur (rest buffers) sent?)))))
                   (do
                     (.release message)
-                    (tap> [:trace {:task ::pipe! :phase :end}])))))
+                    (tap> [:trace {:task ::pipe! :phase :end}])
+                    sent?))))
           (do
             (tap> [:trace {:task ::pipe! :phase :end :output message}])
-            (s/put! output message)))))
+            (d/chain
+              (s/put! output message)
+              (fn [r]
+                (when r
+                  (.addAndGet bytes-read (+ length 5))
+                  (.addAndGet bytes-written (+ length 5)))
+                r))))))
     input))
 
 (defn server
   [{:keys [connect size timeout]}]
   (fn [in-conn conn-info]
+    (.incrementAndGet total-connections)
+    (.incrementAndGet connections)
     (tap> [:info {:task ::server :phase :connected :connection conn-info}])
     (let [out-conn-ref (atom nil)]
       (s/on-closed in-conn
                    (fn []
+                     (.decrementAndGet connections)
                      (tap> [:info {:task ::server :phase :inbound-connection-closed :connection in-conn}])
                      (when-let [c @out-conn-ref]
                        (s/close! c))))
@@ -156,6 +175,20 @@
       (when (<= (get levels level 3) verbose)
         (println (pr-str msg))))))
 
+(defn start-stats-loop!
+  []
+  (doto (Thread. ^Runnable
+                 (fn []
+                   (loop []
+                     (tap> [:info {:task ::stats :bytes-read (.get bytes-read)
+                                   :bytes-written (.get bytes-written)
+                                   :total-connections (.get total-connections)
+                                   :connections (.get connections)}])
+                     (Thread/sleep 30000)
+                     (d/recur))))
+    (.setDaemon true)
+    (.start)))
+
 (defn -main
   [& args]
   (let [options (cli/parse-opts args optspec)]
@@ -176,4 +209,5 @@
                                                           (.addBefore pipeline "handler" "read-timeout" (ReadTimeoutHandler. (-> options :options :timeout) TimeUnit/MILLISECONDS))
                                                           (add-record-length-decoder pipeline))
                                     :raw-stream?        true})]
+      (start-stats-loop!)
       (tap> [:info {:task ::main :phase :server-started :port (aleph.netty/port server)}]))))
