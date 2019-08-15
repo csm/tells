@@ -185,7 +185,7 @@
                                    :total-connections (.get total-connections)
                                    :connections (.get connections)}])
                      (Thread/sleep 30000)
-                     (d/recur))))
+                     (recur))))
     (.setDaemon true)
     (.start)))
 
