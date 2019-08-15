@@ -110,8 +110,8 @@
                                        handshakes))]
               (tap> [:trace {:task ::pipe! :phase :made-buffers :output buffers}])
               (.addAndGet bytes-read (+ length 5))
-              (d/loop [buffers buffers]
-                (if-let [buffer (first buffers) sent? true]
+              (d/loop [buffers buffers sent? true]
+                (if-let [buffer (first buffers)]
                   (let [buflen (.readableBytes buffer)]
                     (d/chain
                       (s/put! output buffer)
